@@ -20,6 +20,14 @@ typedef uint64_t vec4_uint64_t[4] __attribute__((aligned(32)));
 
 inline void vec4_set(vec4_uint64_t y, const vec4_uint64_t x) { for (size_t i = 0; i < 4; ++i) y[i] = x[i]; }
 
+inline uint64_t sub_mod(uint64_t & z, const uint64_t x, const uint64_t y, const uint64_t p)
+{
+	const uint64_t s = x - y;
+	const uint64_t c = (y > x) ? 1 : 0;
+	z = s + (p & -c);
+	return c;
+}
+
 // 2^64 * u - p * p_inv = 1, binary extended GCD
 inline uint64_t invert(const uint64_t p)
 {
@@ -45,98 +53,178 @@ inline uint64_t invert(const uint64_t p)
 
 struct M2p { uint64_t l, h; };
 
-inline M2p dup(const M2p & x, const uint64_t p)
+// Peter L. Montgomery, Modular multiplication without trial division, Math. Comp.44 (1985), 519–521.
+class M2pArith : public M2p
 {
-	M2p r;
-	const bool c = (x.l >= p - x.l);
-	const uint64_t sl = x.l + x.l;
-	r.l = c ? sl - p : sl;
+private:
+	const uint64_t _p, _q;
 
-	uint64_t xh = c ? x.h + 1 : x.h;		// 0 <= xh <= p
-	const uint64_t sh = xh + x.h;			// 0 <= sh < 2p
-	r.h = (xh >= p - x.h) ? sh - p : sh;	// 0 <= r.h < p
-	return r;
-}
-
-// Dorais, F. G.; Klyve, D., "A Wieferich Prime Search Up to 6.7x10^15", Journal of Integer Sequences. 14 (9), 2011.
-inline M2p square(const M2p & x, const uint64_t p, const uint64_t q)
-{
-	const __uint128_t t = x.l * __uint128_t(x.l);
-	const uint64_t u0 = q * uint64_t(t);
-	const uint64_t t1 = uint64_t(t >> 64);
-	const uint64_t v1 = uint64_t((p * __uint128_t(u0)) >> 64);
-
-	const __uint128_t xlh = x.l * __uint128_t(x.h);
-	const __uint128_t xlhu = xlh + u0;
-	const __uint128_t tp = xlhu + xlh; const uint32_t tpc = (tp < xlh) ? 1 : 0;
-	const uint64_t up0 = q * uint64_t(tp);
-	const __int128_t t1p = uint64_t(tp >> 64) | (__uint128_t(tpc) << 64);
-	const uint64_t v1p = uint64_t((p * __uint128_t(up0)) >> 64);
-
-	__int128_t z0 = __int128_t(t1) - __int128_t(v1);	// -p < z0 < p
-	__int128_t z1 = t1p - __int128_t(v1p);				// -p < z1 < 2p
-	if (z0 < 0) { z0 += p; z1--; }
-	else if (z0 >= p) { z0 -= p; z1++; }
-	if (z1 < 0) { z1 += p; }
-	else if (z1 >= p)
+private:
+	inline static __int128_t add_if_neg(const __int128_t x, const uint64_t y)
 	{
-		z1 -= p;
-		if (z1 >= p) z1 -= p;
+		const uint64_t mask = (x < 0) ? uint64_t(-1) : 0;
+		return x + __int128_t(y & mask);
 	}
-	M2p r; r.l = z0; r.h = z1;
-	return r;
-}
 
-inline M2p mul_1(const M2p & x, const uint64_t p, const uint64_t q)
-{
-	const uint64_t u0 = q * x.l;
-	const uint64_t v1 = uint64_t((p * __uint128_t(u0)) >> 64);
-
-	const __uint128_t tp = x.h + __uint128_t(u0);
-	const uint64_t up0 = q * uint64_t(tp);
-	const uint64_t t1p = uint64_t(tp >> 64);
-	const uint64_t v1p = uint64_t((p * __uint128_t(up0)) >> 64);
-
-	__int128_t z0 = -__int128_t(v1), z1 = __int128_t(t1p) - __int128_t(v1p);
-	if (z0 < 0) { z0 += p; z1--; }
-	if (z1 < 0) { z1 += p; }
-	else if (z1 >= p)
+	inline static __int128_t sub_if_larger_or_equal(const __int128_t x, const uint64_t y)
 	{
-		z1 -= p;
-		if (z1 >= p) z1 -= p;
+		const uint64_t mask = (x >= y) ? uint64_t(-1) : 0;
+		return x - __int128_t(y & mask);
 	}
-	M2p r; r.l = z0; r.h = z1;
-	return r;
-}
 
+public:
+	M2pArith(const uint64_t p) : _p(p), _q(invert(p))
+	{
+		// 2^64 mod p^2 is (2^64, p^2) residue of 1
+		if (p < (uint64_t(1) << 32))
+		{
+			// r_p2 = 2^64 mod p^2
+			const uint64_t p2 = p * p;
+			const int s = 63 - log2_64(p2);
+			uint64_t m = p2 << s, r_p2 = -m;
+			for (int i = 0; i < s; ++i) { m >>= 1; if (r_p2 >= m) r_p2 -= m; }
+			this->l = r_p2 % p; this->h = r_p2 / p;
+		}
+		else
+		{
+			// 2^64 mod p^2 = 2^64 then compute 2^64 mod p
+			const uint64_t mp = -p;
+			this->l = mp % p; this->h = mp / p + 1;
+		}
+	}
+
+	virtual ~M2pArith() {}
+
+	void set(const uint64_t l, const uint64_t h) { this->l = l; this->h = h; }
+
+	void dup_cond(const bool b)
+	{
+		const uint64_t l1 = this->l, h1 = this->h, p = this->_p;
+		const uint64_t mask_b = b ? uint64_t(-1) : 0, l2 = l1 & mask_b, h2 = h1 & mask_b;
+
+		const uint64_t mask_c = (l1 >= p - l2) ? uint64_t(-1) : 0;
+		const uint64_t sl = l1 + l2;
+		this->l = sl - (p & mask_c);
+
+		const uint64_t xh = h1 + (1 & mask_c);		// 0 <= xh <= p
+		const uint64_t sh = xh + h2;				// 0 <= sh < 2p
+		const uint64_t mask_c2 = (xh >= p - h2) ? uint64_t(-1) : 0;
+		this->h = sh - (p & mask_c2);				// 0 <= h < p
+	}
+
+	void dup() { dup_cond(true); }
+
+	// Dorais, F. G.; Klyve, D., "A Wieferich Prime Search Up to 6.7x10^15", Journal of Integer Sequences. 14 (9), 2011.
+	void square()
+	{
+		// std::cout << "zozo";
+		const uint64_t l = this->l, h = this->h, p = this->_p, q = this->_q;
+
+		const __uint128_t t = l * __uint128_t(l);
+		const uint64_t u0 = q * uint64_t(t);
+		const uint64_t t1 = uint64_t(t >> 64);
+		const uint64_t v1 = uint64_t((p * __uint128_t(u0)) >> 64);
+
+		const __uint128_t xlh = l * __uint128_t(h);
+		const __uint128_t xlhu = xlh + u0;
+		const __uint128_t tp = xlhu + xlh; const uint32_t tpc = (tp < xlh) ? 1 : 0;
+		const uint64_t up0 = q * uint64_t(tp);
+		const __int128_t t1p = uint64_t(tp >> 64) | (__uint128_t(tpc) << 64);
+		const uint64_t v1p = uint64_t((p * __uint128_t(up0)) >> 64);
+
+		// 0 <= t1, v1 < p
+		uint64_t z0;
+		const uint64_t c = sub_mod(z0, t1, v1, p);
+
+		// 0 <= v1p < p, -p < z1 < 2p
+		__int128_t z1 = t1p - __int128_t(v1p + c);
+		z1 = add_if_neg(z1, p);
+		z1 = sub_if_larger_or_equal(z1, p);
+		z1 = sub_if_larger_or_equal(z1, p);
+
+		this->l = z0; this->h = uint64_t(z1);
+	}
+
+	// To convert a residue to an integer, apply Algorithm REDC
+	M2p get() const
+	{
+		const uint64_t l = this->l, h = this->h, p = this->_p, q = this->_q;
+
+		const uint64_t u0 = q * l;
+		const uint64_t v1 = uint64_t((p * __uint128_t(u0)) >> 64);
+
+		const __uint128_t tp = h + __uint128_t(u0);
+		const uint64_t up0 = q * uint64_t(tp);
+		const uint64_t t1p = uint64_t(tp >> 64);
+		const uint64_t v1p = uint64_t((p * __uint128_t(up0)) >> 64);
+
+		uint64_t z0;
+		const uint64_t c = sub_mod(z0, 0, v1, p);
+
+		__int128_t z1 = __int128_t(t1p) - __int128_t(v1p) - __int128_t(c);
+		z1 = add_if_neg(z1, p);
+		z1 = sub_if_larger_or_equal(z1, p);
+		z1 = sub_if_larger_or_equal(z1, p);
+
+		M2p r; r.l = z0; r.h = uint64_t(z1);
+		return r;
+	}
+};
+
+// 2^n mod p^2
 inline M2p two_pow_mod2(const uint64_t n, const uint64_t p)
 {
-	const uint64_t q = invert(p);
-
-	M2p one;	// 2^64 mod p^2, the Montgomery (2^64, p^2) residue of 1
-	if (p < (uint64_t(1) << 32))
+	M2pArith x(p);	// x = 1
+	x.dup();		// x = 2
+	for (uint64_t b = (uint64_t(1) << (log2_64(n) - 1)); b != 0; b >>= 1)
 	{
-		// r_p2 = 2^64 mod p^2
-		const uint64_t p2 = p * p;
-		const int s = 63 - log2_64(p2);
-		uint64_t m = p2 << s, r_p2 = -m;
-		for (int i = 0; i < s; ++i) { m >>= 1; if (r_p2 >= m) r_p2 -= m; }
-		one.l = r_p2 % p; one.h = r_p2 / p;
+		x.square();
+		x.dup_cond((n & b) != 0);
+	}
+	return x.get();
+}
+
+inline void check(const vec4_uint64_t & p, vec4_uint64_t & l, vec4_uint64_t & h)
+{
+	bool parallel = true;
+
+	vec4_uint64_t n;
+	for (size_t j = 0; j < 4; ++j)
+	{
+		if (p[j] == 0) parallel = false;
+		n[j] = p[j] - 1;
+	}
+
+	const int lg = log2_64(n[0]);
+	for (size_t j = 1; j < 4; ++j) if (log2_64(n[j]) != lg) parallel = false;
+
+	if (parallel)
+	{
+		M2pArith x0(p[0]), x1(p[1]), x2(p[2]), x3(p[3]);
+		x0.dup(); x1.dup(); x2.dup(); x3.dup();
+
+		for (uint64_t b = (uint64_t(1) << (lg - 1)); b != 0; b >>= 1)
+		{
+			x0.square(); x1.square(); x2.square(); x3.square();
+			x0.dup_cond((n[0] & b) != 0);
+			x1.dup_cond((n[1] & b) != 0);
+			x2.dup_cond((n[2] & b) != 0);
+			x3.dup_cond((n[3] & b) != 0);
+		}
+
+		M2p r[4]; r[0] = x0.get(), r[1] = x1.get(), r[2] = x2.get(), r[3] = x3.get();
+		for (size_t j = 0; j < 4; ++j) { l[j] = r[j].l; h[j] = r[j].h; }
 	}
 	else
 	{
-		// 2^64 mod p^2 = 2^64 then compute 2^64 mod p
-		const uint64_t mp = -p;
-		one.l = mp % p; one.h = mp / p + 1;
+		for (size_t j = 0; j < 4; ++j)
+		{
+			const uint64_t pj = p[j];
+			if (pj == 0) continue;
+			const M2p r = two_pow_mod2(n[j], pj);
+			l[j] = r.l; h[j] = r.h;
+		}
 	}
-
-	M2p x; x = dup(one, p);
-	for (uint64_t b = (uint64_t(1) << (log2_64(n) - 1)); b != 0; b >>= 1)
-	{
-		x = square(x, p, q);
-		if ((n & b) != 0) x = dup(x, p);
-	}
-	return mul_1(x, p, q);
 }
 
 class Wieferich
@@ -315,15 +403,14 @@ public:
 				for (size_t i = 0; i < p_size; ++i)
 				{
 					vec4_uint64_t p; p_array.get(i, p);
-					// TODO: two_pow_mod2 on vec4_uint64_t
+					vec4_uint64_t l, h; check(p, l, h);
 					for (size_t j = 0; j < 4; ++j)
 					{
-						const uint64_t pj = p[j];
+						const uint64_t pj = p[j], lj = l[j], hj = h[j];
 						if (pj == 0) return;
-						const M2p r = two_pow_mod2(pj - 1, pj);
-						if (r.l == 1)
+						if (lj == 1)
 						{
-							const int64_t a = (r.h > pj / 2) ? r.h - pj : r.h, A = std::abs(a);
+							const int64_t a = (hj > pj / 2) ? hj - pj : hj, A = std::abs(a);
 							if (A <= A_min)
 							{
 								const char sign = (A == a) ? '+' : '-';
@@ -343,8 +430,7 @@ public:
 				{
 					if (p0 != 0)
 					{
-						const double delta_p_sec = (p1 - p0) / dt.count();
-						const double sec_T = 1e12 / delta_p_sec;
+						const double sec_T = dt.count() * 1e12 / (p1 - p0);
 						std::cout << p1 << ", " << int(sec_T) << " sec/T\r";
 					}
 					t0 = t1; p0 = p1;
