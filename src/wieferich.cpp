@@ -117,7 +117,6 @@ public:
 	// Dorais, F. G.; Klyve, D., "A Wieferich Prime Search Up to 6.7x10^15", Journal of Integer Sequences. 14 (9), 2011.
 	void square()
 	{
-		// std::cout << "zozo";
 		const uint64_t l = this->l, h = this->h, p = this->_p, q = this->_q;
 
 		const __uint128_t t = l * __uint128_t(l);
@@ -205,11 +204,10 @@ inline void check(const vec4_uint64_t & p, vec4_uint64_t & l, vec4_uint64_t & h)
 
 		for (uint64_t b = (uint64_t(1) << (lg - 1)); b != 0; b >>= 1)
 		{
-			x0.square(); x1.square(); x2.square(); x3.square();
-			x0.dup_cond((n[0] & b) != 0);
-			x1.dup_cond((n[1] & b) != 0);
-			x2.dup_cond((n[2] & b) != 0);
-			x3.dup_cond((n[3] & b) != 0);
+			x0.square(); x0.dup_cond((n[0] & b) != 0);
+			x1.square(); x1.dup_cond((n[1] & b) != 0);
+			x2.square(); x2.dup_cond((n[2] & b) != 0);
+			x3.square(); x3.dup_cond((n[3] & b) != 0);
 		}
 
 		M2p r[4]; r[0] = x0.get(), r[1] = x1.get(), r[2] = x2.get(), r[3] = x3.get();
