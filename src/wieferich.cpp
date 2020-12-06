@@ -5,6 +5,8 @@ wieferich is free source code, under the MIT license (see LICENSE). You can redi
 Please give feedback to the authors if improvement is realized. It is distributed in the hope that it will be useful.
 */
 
+// #define TEST	true
+
 #include <cstdint>
 #define _USE_MATH_DEFINES
 #include <cmath>
@@ -14,19 +16,32 @@ Please give feedback to the authors if improvement is realized. It is distribute
 #include <mutex>
 #include <chrono>
 
+#ifdef TEST
+#include <gmp.h>
+
+inline void mpz_set_ui_64(mpz_t & rop, const uint64_t n)
+{
+	mp_limb_t * const p_limb = mpz_limbs_write(rop, 1);
+	p_limb[0] = n;
+	mpz_limbs_finish(rop, 1);
+}
+
+inline void mpz_get_ui_128(const mpz_t & rop, __uint128_t & n)
+{
+	const size_t size = mpz_size(rop);
+	n = 0;
+	const mp_limb_t * const 
+	p_limb = mpz_limbs_read(rop);
+	if (size >= 1) n |= p_limb[0];
+	if (size >= 2) n |= (__uint128_t(p_limb[1]) << 64);
+}
+#endif
+
 inline int log2_64(const uint64_t x) { return 63 - __builtin_clzll(x); }
 
 typedef uint64_t vec4_uint64_t[4] __attribute__((aligned(32)));
 
 inline void vec4_set(vec4_uint64_t y, const vec4_uint64_t x) { for (size_t i = 0; i < 4; ++i) y[i] = x[i]; }
-
-inline uint64_t sub_mod(uint64_t & z, const uint64_t x, const uint64_t y, const uint64_t p)
-{
-	const uint64_t s = x - y;
-	const uint64_t c = (y > x) ? 1 : 0;
-	z = s + (p & -c);
-	return c;
-}
 
 // 2^64 * u - p * p_inv = 1, binary extended GCD
 inline uint64_t invert(const uint64_t p)
@@ -60,16 +75,11 @@ private:
 	const uint64_t _p, _q;
 
 private:
-	inline static __int128_t add_if_neg(const __int128_t x, const uint64_t y)
+	inline static uint64_t sub_mod(uint64_t & z, const uint64_t x, const uint64_t y, const uint64_t p)
 	{
-		const uint64_t mask = (x < 0) ? uint64_t(-1) : 0;
-		return x + __int128_t(y & mask);
-	}
-
-	inline static __int128_t sub_if_larger_or_equal(const __int128_t x, const uint64_t y)
-	{
-		const uint64_t mask = (x >= y) ? uint64_t(-1) : 0;
-		return x - __int128_t(y & mask);
+		const uint64_t mask_c = (y > x) ? uint64_t(-1) : 0;
+		z = x - y + (p & mask_c);
+		return -mask_c;
 	}
 
 public:
@@ -97,6 +107,7 @@ public:
 
 	void set(const uint64_t l, const uint64_t h) { this->l = l; this->h = h; }
 
+	// duplicate if b is true
 	void dup_cond(const bool b)
 	{
 		const uint64_t l1 = this->l, h1 = this->h, p = this->_p;
@@ -126,20 +137,18 @@ public:
 
 		const __uint128_t xlh = l * __uint128_t(h);
 		const __uint128_t xlhu = xlh + u0;
-		const __uint128_t tp = xlhu + xlh; const uint32_t tpc = (tp < xlh) ? 1 : 0;
+		const __uint128_t tp = xlhu + xlh;
+		// 0 <= tp_h < 2p. tp_h >= p if tp_h >= 2^64 or tp_h >= p
+		const uint64_t tp_h = uint64_t(tp >> 64), mask_tpc = ((tp < xlh) | (tp_h >= p)) ? uint64_t(-1) : 0;
 		const uint64_t up0 = q * uint64_t(tp);
-		const __int128_t t1p = uint64_t(tp >> 64) | (__uint128_t(tpc) << 64);
+		const uint64_t t1p = tp_h - (mask_tpc & p);	// 0 <= t1p < p
 		const uint64_t v1p = uint64_t((p * __uint128_t(up0)) >> 64);
 
-		// 0 <= t1, v1 < p
-		uint64_t z0;
+		// 0 <= t1, v1 < p, 0 <= t1p, v1p < p
+		uint64_t z0, z1;
 		const uint64_t c = sub_mod(z0, t1, v1, p);
-
-		// 0 <= v1p < p, -p < z1 < 2p
-		__int128_t z1 = t1p - __int128_t(v1p + c);
-		z1 = add_if_neg(z1, p);
-		z1 = sub_if_larger_or_equal(z1, p);
-		z1 = sub_if_larger_or_equal(z1, p);
+		sub_mod(z1, t1p, v1p, p);
+		sub_mod(z1, z1, c, p);
 
 		this->l = z0; this->h = uint64_t(z1);
 	}
@@ -157,13 +166,10 @@ public:
 		const uint64_t t1p = uint64_t(tp >> 64);
 		const uint64_t v1p = uint64_t((p * __uint128_t(up0)) >> 64);
 
-		uint64_t z0;
+		uint64_t z0, z1;
 		const uint64_t c = sub_mod(z0, 0, v1, p);
-
-		__int128_t z1 = __int128_t(t1p) - __int128_t(v1p) - __int128_t(c);
-		z1 = add_if_neg(z1, p);
-		z1 = sub_if_larger_or_equal(z1, p);
-		z1 = sub_if_larger_or_equal(z1, p);
+		sub_mod(z1, t1p, v1p, p);
+		sub_mod(z1, z1, c, p);
 
 		M2p r; r.l = z0; r.h = uint64_t(z1);
 		return r;
@@ -223,6 +229,24 @@ inline void check(const vec4_uint64_t & p, vec4_uint64_t & l, vec4_uint64_t & h)
 			l[j] = r.l; h[j] = r.h;
 		}
 	}
+
+#ifdef TEST
+	mpz_t zp2, zn, two, zr; mpz_inits(zp2, zn, two, zr, nullptr);
+	mpz_set_ui(two, 2);
+	for (size_t j = 0; j < 4; ++j)
+	{
+		const uint64_t pj = p[j];
+		if (pj == 0) continue;
+		mpz_set_ui_64(zp2, pj); mpz_set_ui_64(zn, n[j]); mpz_mul(zp2, zp2, zp2);
+		mpz_powm(zr, two, zn, zp2);
+		__uint128_t r; mpz_get_ui_128(zr, r);
+		if ((l[j] != uint64_t(r % pj)) | (h[j] != uint64_t(r / pj)))
+		{
+			std::cerr << "Error: p = " << pj << std::endl;
+		}
+	}
+	mpz_clears(zp2, zn, two, zr, nullptr);
+#endif
 }
 
 class Wieferich
