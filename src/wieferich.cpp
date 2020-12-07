@@ -11,9 +11,12 @@ Please give feedback to the authors if improvement is realized. It is distribute
 #define _USE_MATH_DEFINES
 #include <cmath>
 #include <iostream>
+#include <fstream>
+#include <sstream>
 #include <queue>
 #include <thread>
 #include <mutex>
+#include <atomic>
 #include <chrono>
 
 #ifdef TEST
@@ -176,79 +179,6 @@ public:
 	}
 };
 
-// 2^n mod p^2
-inline M2p two_pow_mod2(const uint64_t n, const uint64_t p)
-{
-	M2pArith x(p);	// x = 1
-	x.dup();		// x = 2
-	for (uint64_t b = (uint64_t(1) << (log2_64(n) - 1)); b != 0; b >>= 1)
-	{
-		x.square();
-		x.dup_cond((n & b) != 0);
-	}
-	return x.get();
-}
-
-inline void check(const vec4_uint64_t & p, vec4_uint64_t & l, vec4_uint64_t & h)
-{
-	bool parallel = true;
-
-	vec4_uint64_t n;
-	for (size_t j = 0; j < 4; ++j)
-	{
-		if (p[j] == 0) parallel = false;
-		n[j] = p[j] - 1;
-	}
-
-	const int lg = log2_64(n[0]);
-	for (size_t j = 1; j < 4; ++j) if (log2_64(n[j]) != lg) parallel = false;
-
-	if (parallel)
-	{
-		M2pArith x0(p[0]), x1(p[1]), x2(p[2]), x3(p[3]);
-		x0.dup(); x1.dup(); x2.dup(); x3.dup();
-
-		for (uint64_t b = (uint64_t(1) << (lg - 1)); b != 0; b >>= 1)
-		{
-			x0.square(); x0.dup_cond((n[0] & b) != 0);
-			x1.square(); x1.dup_cond((n[1] & b) != 0);
-			x2.square(); x2.dup_cond((n[2] & b) != 0);
-			x3.square(); x3.dup_cond((n[3] & b) != 0);
-		}
-
-		M2p r[4]; r[0] = x0.get(), r[1] = x1.get(), r[2] = x2.get(), r[3] = x3.get();
-		for (size_t j = 0; j < 4; ++j) { l[j] = r[j].l; h[j] = r[j].h; }
-	}
-	else
-	{
-		for (size_t j = 0; j < 4; ++j)
-		{
-			const uint64_t pj = p[j];
-			if (pj == 0) continue;
-			const M2p r = two_pow_mod2(n[j], pj);
-			l[j] = r.l; h[j] = r.h;
-		}
-	}
-
-#ifdef TEST
-	mpz_t zp2, zn, two, zr; mpz_inits(zp2, zn, two, zr, nullptr);
-	mpz_set_ui(two, 2);
-	for (size_t j = 0; j < 4; ++j)
-	{
-		const uint64_t pj = p[j];
-		if (pj == 0) continue;
-		mpz_set_ui_64(zp2, pj); mpz_set_ui_64(zn, n[j]); mpz_mul(zp2, zp2, zp2);
-		mpz_powm(zr, two, zn, zp2);
-		__uint128_t r; mpz_get_ui_128(zr, r);
-		if ((l[j] != uint64_t(r % pj)) | (h[j] != uint64_t(r / pj)))
-		{
-			std::cerr << "Error: p = " << pj << std::endl;
-		}
-	}
-	mpz_clears(zp2, zn, two, zr, nullptr);
-#endif
-}
-
 class Wieferich
 {
 private:
@@ -293,6 +223,10 @@ private:
 
 	std::mutex _p_queue_mutex;
 	std::queue<PArray> _p_queue;
+
+	std::mutex _output_mutex;
+	std::atomic<uint64_t> _A_min = uint64_t(-1) / 2;
+	std::atomic<uint64_t> _p_cur = 0;
 
 private:
 	void prime_gen()
@@ -391,16 +325,96 @@ private:
 		}
 	}
 
-public:
-	Wieferich(const uint32_t p_min, const uint32_t p_max) : _p_min(p_min), _p_max(p_max)
+	// 2^n mod p^2
+	static M2p two_pow_mod2(const uint64_t n, const uint64_t p)
 	{
-		std::thread t_gen_p([=] { prime_gen(); }); t_gen_p.detach();
+		M2pArith x(p);	// x = 1
+		x.dup();		// x = 2
+		for (uint64_t b = (uint64_t(1) << (log2_64(n) - 1)); b != 0; b >>= 1)
+		{
+			x.square();
+			x.dup_cond((n & b) != 0);
+		}
+		return x.get();
+	}
 
+	static void check(const vec4_uint64_t & p, vec4_uint64_t & l, vec4_uint64_t & h)
+	{
+		bool parallel = true;
+
+		vec4_uint64_t n;
+		for (size_t j = 0; j < 4; ++j)
+		{
+			if (p[j] == 0) parallel = false;
+			n[j] = p[j] - 1;
+		}
+
+		const int lg = log2_64(n[0]);
+		for (size_t j = 1; j < 4; ++j) if (log2_64(n[j]) != lg) parallel = false;
+
+		if (parallel)
+		{
+			M2pArith x0(p[0]), x1(p[1]), x2(p[2]), x3(p[3]);
+			x0.dup(); x1.dup(); x2.dup(); x3.dup();
+
+			for (uint64_t b = (uint64_t(1) << (lg - 1)); b != 0; b >>= 1)
+			{
+				x0.square(); x0.dup_cond((n[0] & b) != 0);
+				x1.square(); x1.dup_cond((n[1] & b) != 0);
+				x2.square(); x2.dup_cond((n[2] & b) != 0);
+				x3.square(); x3.dup_cond((n[3] & b) != 0);
+			}
+
+			M2p r[4]; r[0] = x0.get(), r[1] = x1.get(), r[2] = x2.get(), r[3] = x3.get();
+			for (size_t j = 0; j < 4; ++j) { l[j] = r[j].l; h[j] = r[j].h; }
+		}
+		else
+		{
+			for (size_t j = 0; j < 4; ++j)
+			{
+				const uint64_t pj = p[j];
+				if (pj == 0) continue;
+				const M2p r = two_pow_mod2(n[j], pj);
+				l[j] = r.l; h[j] = r.h;
+			}
+		}
+
+#ifdef TEST
+		mpz_t zp2, zn, two, zr; mpz_inits(zp2, zn, two, zr, nullptr);
+		mpz_set_ui(two, 2);
+		for (size_t j = 0; j < 4; ++j)
+		{
+			const uint64_t pj = p[j];
+			if (pj == 0) continue;
+			mpz_set_ui_64(zp2, pj); mpz_set_ui_64(zn, n[j]); mpz_mul(zp2, zp2, zp2);
+			mpz_powm(zr, two, zn, zp2);
+			__uint128_t r; mpz_get_ui_128(zr, r);
+			if ((l[j] != uint64_t(r % pj)) | (h[j] != uint64_t(r / pj)))
+			{
+				std::cerr << "Error: p = " << pj << std::endl;
+			}
+		}
+		mpz_clears(zp2, zn, two, zr, nullptr);
+#endif
+	}
+
+	void output(const uint64_t p, const int64_t a)
+	{
+		const char sign = (a < 0) ? '-' : '+';
+		std::stringstream ss; ss << p << ": 1 " << sign << " " << std::abs(a) << " p";
+		std::lock_guard<std::mutex> guard(_output_mutex);
+		std::cout << ss.str() << "                 " << std::endl;
+		std::ofstream logFile("wieferich.log", std::ios::app);
+		if (logFile.is_open())
+		{
+			logFile << ss.str() << std::endl;
+			logFile.flush(); logFile.close();
+		}
+	}
+
+	void test_prime()
+	{
 		PArray p_array;
-
-		int64_t A_min = uint64_t(-1) / 2;
-		auto t0 = std::chrono::steady_clock::now();
-		uint64_t p0 = 0;
 
 		while (true)
 		{
@@ -428,36 +442,52 @@ public:
 					vec4_uint64_t l, h; check(p, l, h);
 					for (size_t j = 0; j < 4; ++j)
 					{
-						const uint64_t pj = p[j], lj = l[j], hj = h[j];
+						const uint64_t pj = p[j];
 						if (pj == 0) return;
-						if (lj == 1)
+						if (l[j] == 1)
 						{
-							const int64_t a = (hj > pj / 2) ? hj - pj : hj, A = std::abs(a);
-							if (A <= A_min)
+							const uint64_t hj = h[j];
+							const int64_t a = (hj > pj / 2) ? hj - pj : hj;
+							const uint64_t A = std::abs(a);
+							if (A <= _A_min)
 							{
-								const char sign = (A == a) ? '+' : '-';
-								std::cout << pj << ": 1 " << sign << " " << A << " p" << "                 " << std::endl;
-								A_min = std::max(A, int64_t(10));
+								output(pj, a);
+								_A_min = std::max(A, uint64_t(10));
 							}
 						}
 					}
 				}
-
 				vec4_uint64_t p; p_array.get(p_size - 1, p);
-				const uint64_t p1 = p[3];
-
-				const auto t1 = std::chrono::steady_clock::now();
-				const std::chrono::duration<double> dt = t1 - t0;
-				if (dt.count() > 5)
-				{
-					if (p0 != 0)
-					{
-						const double sec_T = dt.count() * 1e12 / (p1 - p0);
-						std::cout << p1 << ", " << int(sec_T) << " sec/T\r";
-					}
-					t0 = t1; p0 = p1;
-				}
+				_p_cur = std::max(uint64_t(_p_cur), p[3]);
 			}
+		}
+	}
+
+public:
+	Wieferich(const uint32_t p_min, const uint32_t p_max, const size_t thread_count) : _p_min(p_min), _p_max(p_max)
+	{
+		std::thread t_gen_p([=] { prime_gen(); }); t_gen_p.detach();
+		for (size_t i = 0; i < thread_count; ++i)
+		{
+			std::thread t_test_p([=] { test_prime(); }); t_test_p.detach();
+		}
+
+		auto t0 = std::chrono::steady_clock::now();
+		uint64_t p0 = 0;
+
+		while (true)
+		{
+			std::this_thread::sleep_for(std::chrono::seconds(5));
+			const uint64_t p1 = _p_cur;
+			const auto t1 = std::chrono::steady_clock::now();
+			const std::chrono::duration<double> dt = t1 - t0;
+			if (p0 != 0)
+			{
+				const double sec_T = dt.count() * 1e12 / (p1 - p0);
+				std::lock_guard<std::mutex> guard(_output_mutex);
+				std::cout << p1 << ", " << int(sec_T) << " sec/T\r";
+			}
+			t0 = t1; p0 = p1;
 		}
 	}
 
@@ -469,14 +499,16 @@ int main(int argc, char * argv[])
 	std::cerr << "wieferich: search for Wieferich primes" << std::endl;
 	std::cerr << " Copyright (c) 2020, Yves Gallot" << std::endl;
 	std::cerr << " wieferich is free source code, under the MIT license." << std::endl << std::endl;
-	std::cerr << " Usage: wieferich <p_min> <p_max>" << std::endl;
+	std::cerr << " Usage: wieferich <n_threads> <p_min> <p_max>" << std::endl;
+	std::cerr << "   n_threads: the number of threads (default 3)" << std::endl;
 	std::cerr << "   p_min: the start of the p range, in T (10^12) values (default 0)" << std::endl;
 	std::cerr << "   p_max: the end of the p range, in T (10^12) values (default p_min + 1)" << std::endl;
 
-	const uint32_t p_min = (argc > 1) ? std::min(std::atoi(argv[1]), 18446744) : 0;
-	const uint32_t p_max = (argc > 2) ? std::min(std::atoi(argv[2]), 18446745) : p_min + 1;
+	const size_t n_threads = (argc > 1) ? std::atoi(argv[1]) : 3;
+	const uint32_t p_min = (argc > 2) ? std::min(std::atoi(argv[2]), 18446744) : 0;
+	const uint32_t p_max = (argc > 3) ? std::min(std::atoi(argv[3]), 18446745) : p_min + 1;
 
-	Wieferich(p_min, p_max);
+	Wieferich(p_min, p_max, n_threads);
 
 	return EXIT_SUCCESS;
 }
