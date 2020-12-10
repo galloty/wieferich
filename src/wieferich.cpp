@@ -223,6 +223,8 @@ private:
 
 	std::mutex _p_queue_mutex;
 	std::queue<PArray> _p_queue;
+	bool _end_range = false;
+	std::atomic<size_t> _running_threads = 0;
 
 	std::mutex _output_mutex;
 	std::atomic<uint64_t> _A_min = uint64_t(-1) / 2;
@@ -300,6 +302,7 @@ private:
 						{
 							while (!filler.add(0));
 							_p_queue.push(p_array);
+							_end_range = true;
 							return;
 						}
 					}
@@ -431,6 +434,7 @@ private:
 
 			if (!found)
 			{
+				if (_end_range) { _running_threads--; return; }
 				// std::cout << "Waiting input..." << std::endl;
 				std::this_thread::sleep_for(std::chrono::milliseconds(10));
 			}
@@ -443,7 +447,7 @@ private:
 					for (size_t j = 0; j < 4; ++j)
 					{
 						const uint64_t pj = p[j];
-						if (pj == 0) return;
+						if (pj == 0) continue;
 						if (l[j] == 1)
 						{
 							const uint64_t hj = h[j];
@@ -469,13 +473,14 @@ public:
 		std::thread t_gen_p([=] { prime_gen(); }); t_gen_p.detach();
 		for (size_t i = 0; i < thread_count; ++i)
 		{
+			_running_threads++;
 			std::thread t_test_p([=] { test_prime(); }); t_test_p.detach();
 		}
 
 		auto t0 = std::chrono::steady_clock::now();
 		uint64_t p0 = 0;
 
-		while (true)
+		while (_running_threads != 0)
 		{
 			std::this_thread::sleep_for(std::chrono::seconds(5));
 			const uint64_t p1 = _p_cur;
