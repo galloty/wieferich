@@ -42,33 +42,6 @@ inline void mpz_get_ui_128(const mpz_t & rop, __uint128_t & n)
 
 inline int log2_64(const uint64_t x) { return 63 - __builtin_clzll(x); }
 
-typedef uint64_t vec4_uint64_t[4] __attribute__((aligned(32)));
-
-inline void vec4_set(vec4_uint64_t y, const vec4_uint64_t x) { for (size_t i = 0; i < 4; ++i) y[i] = x[i]; }
-
-// 2^64 * u - p * p_inv = 1, binary extended GCD
-inline uint64_t invert(const uint64_t p)
-{
-	const uint64_t a_2 = uint64_t(1) << 63, b = p;
-	uint64_t g1 = a_2, g2 = b, t = a_2, s = (1 + b) / 2;
-	while (g1 != 1)
-	{
-		if (g1 > g2)
-		{
-			g1 /= 2;
-			t /= 2;
-			if (s % 2 != 0)
-			{
-				s += b;
-				t += a_2;
-			}
-			s /= 2;
-		}
-		else g2 -= g1;
-	}
-	return -t;
-}
-
 struct M2p { uint64_t l, h; };
 
 // Peter L. Montgomery, Modular multiplication without trial division, Math. Comp.44 (1985), 519–521.
@@ -83,6 +56,14 @@ private:
 		const uint64_t mask_c = (y > x) ? uint64_t(-1) : 0;
 		z = x - y + (p & mask_c);
 		return -mask_c;
+	}
+
+	// p * p_inv = 1 (mod 2^64) (Newton's method)
+	inline static uint64_t invert(const uint64_t p)
+	{
+		uint64_t p_inv = 1, prev = 0;
+		while (p_inv != prev) { prev = p_inv; p_inv *= 2 - p * p_inv; }
+		return p_inv;
 	}
 
 public:
@@ -105,8 +86,6 @@ public:
 			this->l = mp % p; this->h = mp / p + 1;
 		}
 	}
-
-	virtual ~M2pArith() {}
 
 	void set(const uint64_t l, const uint64_t h) { this->l = l; this->h = h; }
 
@@ -182,38 +161,11 @@ public:
 class Wieferich
 {
 private:
-	static const size_t p_size = 256;
+	static const size_t p_size = 1024;
 
 	struct PArray
 	{
-		vec4_uint64_t data[p_size];	// 8 KB
-
-		void get(const size_t i, vec4_uint64_t p) { vec4_set(p, data[i]); }
-	};
-
-	class PArrayFiller
-	{
-	private:
-		PArray & _p_array;
-		size_t _iv = 0, _ia = 0;
-		vec4_uint64_t _v;
-
-	public:
-		PArrayFiller(PArray & p_array) : _p_array(p_array) {}
-		virtual ~PArrayFiller() {};
-
-		bool add(const uint64_t p)
-		{
-			_v[_iv] = p;
-			_iv = (_iv + 1) % 4;
-			if (_iv == 0)
-			{
-				vec4_set(_p_array.data[_ia], _v);
-				_ia = (_ia + 1) % p_size;
-				return (_ia == 0);
-			}
-			return false;
-		}
+		uint64_t data[p_size];	// 8 KB
 	};
 
 private:
@@ -283,7 +235,7 @@ private:
 		}
 
 		PArray p_array;
-		PArrayFiller filler(p_array);
+		size_t p_array_i = 0;
 		size_t queue_size = 0;
 
 		for (uint64_t jp = p0; true; jp += sp_max)
@@ -293,15 +245,15 @@ private:
 				if (!sieve[kp])
 				{
 					const uint64_t p = jp + 2 * kp + 1;
-					if (filler.add(p))
+					p_array.data[p_array_i] = p;
+					p_array_i = (p_array_i + 1) % p_size;
+					if (p_array_i == 0)
 					{
 						std::lock_guard<std::mutex> guard(_p_queue_mutex);
 						_p_queue.push(p_array);
 						queue_size = _p_queue.size();
 						if (p >= p1)
 						{
-							while (!filler.add(0));
-							_p_queue.push(p_array);
 							_end_range = true;
 							return;
 						}
@@ -341,17 +293,11 @@ private:
 		return x.get();
 	}
 
-	static void check(const vec4_uint64_t & p, vec4_uint64_t & l, vec4_uint64_t & h)
+	static void check(const uint64_t p[4], uint64_t l[4], uint64_t h[4])
 	{
+		uint64_t n[4]; for (size_t j = 0; j < 4; ++j) n[j] = p[j] - 1;
+
 		bool parallel = true;
-
-		vec4_uint64_t n;
-		for (size_t j = 0; j < 4; ++j)
-		{
-			if (p[j] == 0) parallel = false;
-			n[j] = p[j] - 1;
-		}
-
 		const int lg = log2_64(n[0]);
 		for (size_t j = 1; j < 4; ++j) if (log2_64(n[j]) != lg) parallel = false;
 
@@ -375,9 +321,7 @@ private:
 		{
 			for (size_t j = 0; j < 4; ++j)
 			{
-				const uint64_t pj = p[j];
-				if (pj == 0) continue;
-				const M2p r = two_pow_mod2(n[j], pj);
+				const M2p r = two_pow_mod2(n[j], p[j]);
 				l[j] = r.l; h[j] = r.h;
 			}
 		}
@@ -388,7 +332,6 @@ private:
 		for (size_t j = 0; j < 4; ++j)
 		{
 			const uint64_t pj = p[j];
-			if (pj == 0) continue;
 			mpz_set_ui_64(zp2, pj); mpz_set_ui_64(zn, n[j]); mpz_mul(zp2, zp2, zp2);
 			mpz_powm(zr, two, zn, zp2);
 			__uint128_t r; mpz_get_ui_128(zr, r);
@@ -440,17 +383,15 @@ private:
 			}
 			else
 			{
-				for (size_t i = 0; i < p_size; ++i)
+				for (size_t i = 0; i < p_size; i += 4)
 				{
-					vec4_uint64_t p; p_array.get(i, p);
-					vec4_uint64_t l, h; check(p, l, h);
+					const uint64_t * const p = &p_array.data[i];
+					uint64_t l[4], h[4]; check(p, l, h);
 					for (size_t j = 0; j < 4; ++j)
 					{
-						const uint64_t pj = p[j];
-						if (pj == 0) continue;
 						if (l[j] == 1)
 						{
-							const uint64_t hj = h[j];
+							const uint64_t pj = p[j], hj = h[j];
 							const int64_t a = (hj > pj / 2) ? hj - pj : hj;
 							const uint64_t A = std::abs(a);
 							if (A <= _A_min)
@@ -461,8 +402,8 @@ private:
 						}
 					}
 				}
-				vec4_uint64_t p; p_array.get(p_size - 1, p);
-				_p_cur = std::max(uint64_t(_p_cur), p[3]);
+				uint64_t p = p_array.data[p_size - 1];
+				_p_cur = std::max(uint64_t(_p_cur), p);
 			}
 		}
 	}
