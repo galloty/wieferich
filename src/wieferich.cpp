@@ -40,7 +40,7 @@ inline void mpz_get_ui_128(const mpz_t & rop, __uint128_t & n)
 }
 #endif
 
-inline int log2_64(const uint64_t x) { return 63 - __builtin_clzll(x); }
+#define		TERA	1000000000000ull
 
 struct M2p { uint64_t l, h; };
 
@@ -59,7 +59,7 @@ private:
 	}
 
 	// p * p_inv = 1 (mod 2^64) (Newton's method)
-	inline static uint64_t invert(const uint64_t p)
+	constexpr static uint64_t invert(const uint64_t p)
 	{
 		uint64_t p_inv = 1, prev = 0;
 		while (p_inv != prev) { prev = p_inv; p_inv *= 2 - p * p_inv; }
@@ -70,19 +70,15 @@ public:
 	M2pArith(const uint64_t p) : _p(p), _q(invert(p))
 	{
 		// 2^64 mod p^2 is (2^64, p^2) residue of 1
-		if (p < (uint64_t(1) << 32))
+		if ((p >> 32) == 0)
 		{
-			// r_p2 = 2^64 mod p^2
-			const uint64_t p2 = p * p;
-			const int s = 63 - log2_64(p2);
-			uint64_t m = p2 << s, r_p2 = -m;
-			for (int i = 0; i < s; ++i) { m >>= 1; if (r_p2 >= m) r_p2 -= m; }
+			const uint64_t p2 = p * p, r_p2 = (-p2) % p2;	// 2^64 mod p^2
 			this->l = r_p2 % p; this->h = r_p2 / p;
 		}
 		else
 		{
-			// 2^64 mod p^2 = 2^64 then compute 2^64 mod p
-			const uint64_t mp = -p;
+			// 2^64 mod p^2 = 2^64
+			const uint64_t mp = -p;	// 2^64 - p
 			this->l = mp % p; this->h = mp / p + 1;
 		}
 	}
@@ -183,8 +179,9 @@ private:
 	std::atomic<uint64_t> _p_cur = 0;
 
 private:
-	void prime_gen()
+	void pseudo_prime_gen()
 	{
+		// Segmented sieve of Eratosthenes: outputs have no factor < 65537.
 		static const uint32_t sp_max = 1 << 16;
 		static const size_t sieve_size = sp_max / 2;	// sieve with an odd prime table.
 		static const size_t odd_prime_count = 6541;		// # odd primes with p < 2^16.
@@ -206,8 +203,8 @@ private:
 
 		for (size_t k = 0; k < sieve_size; ++k) sieve[k] = false;
 
-		const uint64_t p0 = ((1000000000000ull * _p_min) / sp_max) * sp_max;
-		const uint64_t p1 = (_p_max < 18446745) ? ((1000000000000ull * _p_max) / sp_max + 1) * sp_max : uint64_t(-1);
+		const uint64_t p0 = ((TERA * _p_min) / sp_max) * sp_max;
+		const uint64_t p1 = (_p_max < 18446745) ? ((TERA * _p_max) / sp_max + 1) * sp_max : uint64_t(-1);
 		std::cout << "p in [" << p0 << "; " << p1 << "] " << std::endl;
 
 		if (_p_min == 0)
@@ -272,7 +269,6 @@ private:
 
 			while (queue_size > max_queue_size)
 			{
-				// std::cout << "prime_gen: waiting... p ~ " << jp + 1 << std::endl;
 				std::this_thread::sleep_for(std::chrono::milliseconds(100));
 				std::lock_guard<std::mutex> guard(_p_queue_mutex);
 				queue_size = _p_queue.size();
@@ -280,18 +276,7 @@ private:
 		}
 	}
 
-	// 2^n mod p^2
-	static M2p two_pow_mod2(const uint64_t n, const uint64_t p)
-	{
-		M2pArith x(p);	// x = 1
-		x.dup();		// x = 2
-		for (uint64_t b = (uint64_t(1) << (log2_64(n) - 1)); b != 0; b >>= 1)
-		{
-			x.square();
-			x.dup_cond((n & b) != 0);
-		}
-		return x.get();
-	}
+	constexpr static int log2_64(const uint64_t x) { return 63 - __builtin_clzll(x); }
 
 	static void check(const uint64_t p[4], uint64_t l[4], uint64_t h[4])
 	{
@@ -301,12 +286,16 @@ private:
 		const int lg = log2_64(n[0]);
 		for (size_t j = 1; j < 4; ++j) if (log2_64(n[j]) != lg) parallel = false;
 
+		// 2^n mod p^2
 		if (parallel)
 		{
-			M2pArith x0(p[0]), x1(p[1]), x2(p[2]), x3(p[3]);
-			x0.dup(); x1.dup(); x2.dup(); x3.dup();
+			M2pArith x0(p[0]), x1(p[1]), x2(p[2]), x3(p[3]);	// x = 1
+			x0.dup(); x1.dup(); x2.dup(); x3.dup();				// x = 2
 
-			for (uint64_t b = (uint64_t(1) << (lg - 1)); b != 0; b >>= 1)
+			x0.dup(); x1.dup(); x2.dup(); x3.dup();				// first step: 2^2 = 2 + 2
+			x0.dup(); x1.dup(); x2.dup(); x3.dup();				// first step: cond is true
+
+			for (uint64_t b = (uint64_t(1) << (lg - 2)); b != 0; b >>= 1)
 			{
 				x0.square(); x0.dup_cond((n[0] & b) != 0);
 				x1.square(); x1.dup_cond((n[1] & b) != 0);
@@ -321,7 +310,17 @@ private:
 		{
 			for (size_t j = 0; j < 4; ++j)
 			{
-				const M2p r = two_pow_mod2(n[j], p[j]);
+				M2pArith x(p[j]);	// x = 1
+				x.dup();			// x = 2
+
+				x.dup(); x.dup();	// first step: 2^2 = 2 + 2, cond is true
+
+				for (uint64_t b = (uint64_t(1) << (log2_64(n[j]) - 2)); b != 0; b >>= 1)
+				{
+					x.square();
+					x.dup_cond((n[j] & b) != 0);
+				}
+				const M2p r = x.get();
 				l[j] = r.l; h[j] = r.h;
 			}
 		}
@@ -349,7 +348,7 @@ private:
 		const char sign = (a < 0) ? '-' : '+';
 		std::stringstream ss; ss << p << ": 1 " << sign << " " << std::abs(a) << " p";
 		std::lock_guard<std::mutex> guard(_output_mutex);
-		std::cout << ss.str() << "                 " << std::endl;
+		std::cout << ss.str() << "                             " << std::endl;
 		std::ofstream logFile("wieferich.log", std::ios::app);
 		if (logFile.is_open())
 		{
@@ -411,13 +410,15 @@ private:
 public:
 	Wieferich(const uint32_t p_min, const uint32_t p_max, const size_t thread_count) : _p_min(p_min), _p_max(p_max)
 	{
-		std::thread t_gen_p([=] { prime_gen(); }); t_gen_p.detach();
+		std::thread t_gen_p([=] { pseudo_prime_gen(); }); t_gen_p.detach();
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
 		for (size_t i = 0; i < thread_count; ++i)
 		{
 			_running_threads++;
 			std::thread t_test_p([=] { test_prime(); }); t_test_p.detach();
 		}
 
+		const uint64_t p2 = (_p_max < 18446745) ? TERA * _p_max : uint64_t(-1);
 		auto t0 = std::chrono::steady_clock::now();
 		uint64_t p0 = 0;
 
@@ -429,9 +430,10 @@ public:
 			const std::chrono::duration<double> dt = t1 - t0;
 			if (p0 != 0)
 			{
-				const double sec_T = dt.count() * 1e12 / (p1 - p0);
+				const double speed = (p1 - p0) / dt.count();
+				const double eta = (p2 - p1) / speed;
 				std::lock_guard<std::mutex> guard(_output_mutex);
-				std::cout << p1 << ", " << int(sec_T) << " sec/T\r";
+				std::cout << "p = " << p1 << ", dp = " << int(speed * 1e-6) << "M/sec, ETA = " << int(eta / 60.0) << " min      \r";
 			}
 			t0 = t1; p0 = p1;
 		}
@@ -447,8 +449,8 @@ int main(int argc, char * argv[])
 	std::cerr << " wieferich is free source code, under the MIT license." << std::endl << std::endl;
 	std::cerr << " Usage: wieferich <n_threads> <p_min> <p_max>" << std::endl;
 	std::cerr << "   n_threads: the number of threads (default 3)" << std::endl;
-	std::cerr << "   p_min: the start of the p range, in T (10^12) values (default 0)" << std::endl;
-	std::cerr << "   p_max: the end of the p range, in T (10^12) values (default p_min + 1)" << std::endl;
+	std::cerr << "   p_min: the start of the p range, in Tera (10^12) values (default 0)" << std::endl;
+	std::cerr << "   p_max: the end of the p range, in Tera (10^12) values (default p_min + 1)" << std::endl;
 
 	const size_t n_threads = (argc > 1) ? std::atoi(argv[1]) : 3;
 	const uint32_t p_min = (argc > 2) ? std::min(std::atoi(argv[2]), 18446744) : 0;
