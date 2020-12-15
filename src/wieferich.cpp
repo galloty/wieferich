@@ -292,15 +292,14 @@ private:
 			M2pArith x0(p[0]), x1(p[1]), x2(p[2]), x3(p[3]);	// x = 1
 			x0.dup(); x1.dup(); x2.dup(); x3.dup();				// x = 2
 
+			uint64_t b = uint64_t(1) << (lg - 1);
 			x0.dup(); x1.dup(); x2.dup(); x3.dup();				// first step: 2^2 = 2 + 2
-			x0.dup(); x1.dup(); x2.dup(); x3.dup();				// first step: cond is true
+			x0.dup_cond((n[0] & b) != 0); x1.dup_cond((n[1] & b) != 0); x2.dup_cond((n[2] & b) != 0); x3.dup_cond((n[3] & b) != 0);
 
-			for (uint64_t b = (uint64_t(1) << (lg - 2)); b != 0; b >>= 1)
+			for (b >>= 1; b != 0; b >>= 1)
 			{
-				x0.square(); x0.dup_cond((n[0] & b) != 0);
-				x1.square(); x1.dup_cond((n[1] & b) != 0);
-				x2.square(); x2.dup_cond((n[2] & b) != 0);
-				x3.square(); x3.dup_cond((n[3] & b) != 0);
+				x0.square(); x1.square(); x2.square(); x3.square();
+				x0.dup_cond((n[0] & b) != 0); x1.dup_cond((n[1] & b) != 0); x2.dup_cond((n[2] & b) != 0); x3.dup_cond((n[3] & b) != 0);
 			}
 
 			M2p r[4]; r[0] = x0.get(), r[1] = x1.get(), r[2] = x2.get(), r[3] = x3.get();
@@ -313,9 +312,10 @@ private:
 				M2pArith x(p[j]);	// x = 1
 				x.dup();			// x = 2
 
-				x.dup(); x.dup();	// first step: 2^2 = 2 + 2, cond is true
+				uint64_t b = uint64_t(1) << (log2_64(n[j]) - 1);
+				x.dup(); x.dup_cond((n[j] & b) != 0);	// first step: 2^2 = 2 + 2
 
-				for (uint64_t b = (uint64_t(1) << (log2_64(n[j]) - 2)); b != 0; b >>= 1)
+				for (b >>= 1; b != 0; b >>= 1)
 				{
 					x.square();
 					x.dup_cond((n[j] & b) != 0);
