@@ -125,8 +125,7 @@ public:
 		// 0 <= t1, v1 < p, 0 <= t1p, v1p < p
 		uint64_t z0, z1;
 		const uint64_t c = sub_mod(z0, t1, v1, p);
-		sub_mod(z1, t1p, v1p, p);
-		sub_mod(z1, z1, c, p);
+		sub_mod(z1, t1p, v1p + c, p);
 
 		this->l = z0; this->h = uint64_t(z1);
 	}
@@ -146,8 +145,7 @@ public:
 
 		uint64_t z0, z1;
 		const uint64_t c = sub_mod(z0, 0, v1, p);
-		sub_mod(z1, t1p, v1p, p);
-		sub_mod(z1, z1, c, p);
+		sub_mod(z1, t1p, v1p + c, p);
 
 		M2p r; r.l = z0; r.h = uint64_t(z1);
 		return r;
