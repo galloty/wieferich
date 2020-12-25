@@ -58,6 +58,7 @@ private:
 		return -mask_c;
 	}
 
+public:
 	// p * p_inv = 1 (mod 2^64) (Newton's method)
 	constexpr static uint64_t invert(const uint64_t p)
 	{
@@ -177,6 +178,54 @@ private:
 	std::atomic<uint64_t> _p_cur = 0;
 
 private:
+	static uint64_t addMp(const uint64_t a, const uint64_t b, const uint64_t p)
+	{
+		const uint64_t c = (a >= p - b) ? p : 0;
+		return a + b - c;
+	}
+
+	static uint64_t mulMp(const uint64_t a, const uint64_t b, const uint64_t p, const uint64_t  q)
+	{
+		const __uint128_t t = a * __uint128_t(b);
+		const uint64_t ab_l = uint64_t(t), ab_h = uint64_t(t >> 64);
+		const uint64_t m = ab_l * q, mp = uint64_t((m * __uint128_t(p)) >> 64);
+		const uint64_t r = ab_h - mp;
+		return (ab_h < mp) ? r + p : r;
+	}
+
+	static bool strong_prp(const uint64_t p)
+	{
+		const uint64_t pmo = p - 1;
+		const int t = 63 - __builtin_clzll(pmo & -pmo);	// this is ctz, p = d*2^t + 1, where d is odd
+		const uint64_t exp = p >> t;
+		uint64_t curBit = 0x8000000000000000 >> (__builtin_clzll(exp) + 1);
+
+		const uint64_t q = M2pArith::invert(p);
+		const uint64_t one = (-p) % p;
+	
+		uint64_t a = addMp(one, one, p);
+
+ 		while (curBit != 0)
+		{
+			a = mulMp(a, a, p, q);
+			if ((exp & curBit) != 0) a = addMp(a, a, p);
+			curBit >>= 1;
+		}
+
+		// a^d = 1 (mod p) or a^{d*2^0} = -1 (mod p)
+		if ((a == one) | (a == p - one)) return true;
+
+		// a^{d*2^s} = -1 (mod p) for some s in 0 < s < t
+		for (int s = 1; s < t; ++s)
+		{
+			a = mulMp(a, a, p, q);
+			if (a == p - one) return true;
+		}
+
+		return false;
+	}
+
+private:
 	void pseudo_prime_gen()
 	{
 		// Segmented sieve of Eratosthenes: outputs have no factor < 65537.
@@ -240,17 +289,20 @@ private:
 				if (!sieve[kp])
 				{
 					const uint64_t p = jp + 2 * kp + 1;
-					p_array.data[p_array_i] = p;
-					p_array_i = (p_array_i + 1) % p_size;
-					if (p_array_i == 0)
+					// if (strong_prp(p))
 					{
-						std::lock_guard<std::mutex> guard(_p_queue_mutex);
-						_p_queue.push(p_array);
-						queue_size = _p_queue.size();
-						if (p >= p1)
+						p_array.data[p_array_i] = p;
+						p_array_i = (p_array_i + 1) % p_size;
+						if (p_array_i == 0)
 						{
-							_end_range = true;
-							return;
+							std::lock_guard<std::mutex> guard(_p_queue_mutex);
+							_p_queue.push(p_array);
+							queue_size = _p_queue.size();
+							if (p >= p1)
+							{
+								_end_range = true;
+								return;
+							}
 						}
 					}
 				}
